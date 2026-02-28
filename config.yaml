@@ -1,0 +1,54 @@
+# ============ EmotioNotes 毕设项目配置 ============
+
+# 数据集路径配置
+dataset:
+  deam_annotations: "./DEAM_Annotations/annotations.json"
+  deam_audio_dir: "./DEAM_audio/full"
+  deam_features_dir: "./features"
+  
+# 预处理配置
+preprocessing:
+  target_sr: 44100              # 目标采样率 (Hz)
+  target_duration: 30           # 目标片段时长 (秒)
+  mono: true                    # 是否转为单声道
+  trim_db: 30                   # 静音检测阈值
+  
+# 数据集划分配置
+splitting:
+  train_ratio: 0.7
+  val_ratio: 0.2
+  test_ratio: 0.1
+  random_seed: 42
+  
+# 音频→文本模型配置
+audio_to_text:
+  model_name: "m-a-p/MERT-v1-95M"
+  device: "cuda"  # 或 "cpu"
+  
+# LLM配置
+llm:
+  provider: "openai"  # 或 "local"
+  model_name: "gpt-4o"
+  api_key: "your-api-key-here"  # 替换为你的API Key
+  temperature: 0.3
+  max_tokens: 200
+  
+# 质量评估配置
+quality_assessment:
+  auto_min_length: 50
+  manual_sample_rate: 0.1  # 10%抽检
+  manual_score_threshold: 3.0  # 满分5分
+  
+# 输出路径配置
+output:
+  processed_audio_dir: "./data/processed_audio"
+  descriptions_dir: "./data/descriptions"
+  emotions_dir: "./data/emotions"
+  features_dir: "./data/features"
+  splits_dir: "./data/splits"
+  results_dir: "./results"
+  
+# 日志配置
+logging:
+  level: "INFO"
+  log_file: "./logs/experiment.log"
