@@ -16,7 +16,7 @@ def test_ai_connection():
     try:
         # 调用 qwen-plus 模型（你指定的模型名）
         response = client.chat.completions.create(
-            model="qwen-plus",          # 你指定的模型名称
+            model="qwen2-audio-7b-instruct",          # 你指定的模型名称
             messages=[
                 {
                     "role": "user",

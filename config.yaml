@@ -22,15 +22,22 @@ splitting:
   
 # 音频→文本模型配置
 audio_to_text:
-  model_name: "m-a-p/MERT-v1-95M"
-  device: "cuda"  # 或 "cpu"
+  provider: "dashscope"
+  model_name: "qwen2-audio-instruct"
+  endpoint: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+  api_key: "sk-xxxx"
+  temperature: 0.2
+  max_tokens: 220
+  clip_seconds: 30
+  max_samples: 3  # 调试阶段先小样本，设为 null 则全量
+  request_timeout: 180
   
 # LLM配置
 llm:
   provider: "aliyun"  # aliyun | gitcode | atomgit | openai
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 通义千问 OpenAI 兼容接口
   model_name: "qwen-plus"  # 与 test.py 中保持一致
-  api_key: "sk-5293138d9b904409bbe36f43994f6703"  # 建议使用环境变量 ALIYUN_API_KEY 覆盖
+  api_key: "sk-xxxx"  # 建议使用环境变量 ALIYUN_API_KEY 覆盖
   temperature: 0.7
   max_tokens: 200
   

@@ -1,0 +1,3 @@
+﻿segment_id,song_id,audio_path,valence_mean,arousal_mean,description_raw,len_chars,covered_dimensions,missing_dimensions,has_hedging,hallucination_risk,quality_score,quality_level,quality_note
+2046,2046,data/processed_audio/2046.wav,5.5,5.17,这段音乐以温暖的口琴和木吉他伴奏开始，营造出一种充满激情和情感的氛围。随着音乐的进行，可以听到铜管乐器的加入，使得整个乐曲更加丰富和壮观。整体上，这首音乐属于爵士乐风格，具有强烈的情感表达和动感十足的节奏。听完整首曲子，可以感受到一种深刻而细腻的情绪波动，让人仿佛置身于一场浪漫的音乐剧之中。,146,4,melody,False,True,70,WARN,维度覆盖不足(4/5);存在臆测风险词
+1670,1670,data/processed_audio/1670.wav,5.9,5.4,这段音乐的旋律富有感情，节奏明快，以F#小调进行，主要由打击乐器和低音部组成，呈现出雷鬼风格且带有迷幻色彩。整体听感令人愉悦，仿佛置身于夏威夷的海滩之上。,77,5,,False,True,65,WARN,长度不在80~180字;存在臆测风险词

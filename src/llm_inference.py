@@ -256,9 +256,16 @@ def run(config_path=None):
     emotions_dir = project_root / output_cfg["emotions_dir"].lstrip("./")
     emotions_dir.mkdir(parents=True, exist_ok=True)
 
-    in_path = descriptions_dir / "test_descriptions_dummy.csv"
-    if not in_path.exists():
-        raise FileNotFoundError(f"未找到输入描述文件：{in_path}，请先运行 audio_to_text.py")
+    real_path = descriptions_dir / "test_descriptions_real.csv"
+    dummy_path = descriptions_dir / "test_descriptions_dummy.csv"
+    if real_path.exists():
+        in_path = real_path
+    elif dummy_path.exists():
+        in_path = dummy_path
+    else:
+        raise FileNotFoundError(
+            f"未找到输入描述文件：{real_path} 或 {dummy_path}，请先运行 audio_to_text.py"
+        )
 
     out_path = emotions_dir / "llm_predictions_test.csv"
 
