@@ -275,10 +275,10 @@ def run(config_path=None):
     if missing:
         raise RuntimeError(f"输入文件缺少必要列：{missing}")
 
-    # 为了控制 token 消耗，先只在前 N 条样本上测试
-    MAX_SAMPLES = 20  # 可以根据需要调大或改为 None 跑全量
-    if MAX_SAMPLES is not None and len(df) > MAX_SAMPLES:
-        df = df.head(MAX_SAMPLES)
+    # 与 config.yaml 中 llm.max_samples 对齐；null 表示处理描述文件全部行
+    max_samples = llm_cfg.get("max_samples")
+    if max_samples is not None:
+        df = df.head(int(max_samples))
 
     # 断点续跑：若输出存在，则跳过已完成的 segment_id
     done_ids = set()

@@ -1,0 +1,13 @@
+{
+  "n_eval": 10,
+  "valence_mae": 0.6836242254502831,
+  "valence_rmse": 0.7616910140292437,
+  "valence_pearson": 0.787697507975912,
+  "arousal_mae": 0.7842223287546497,
+  "arousal_rmse": 0.8627654043050961,
+  "arousal_pearson": 0.13178209919304537,
+  "label_accuracy_from_reg": 0.3,
+  "label_accuracy_from_clf": 0.3,
+  "n_train_used": 300,
+  "feature_dir": "D:\\Users\\ylq\\Desktop\\毕设\\EmotioNotes-Thesis\\features\\features"
+}
