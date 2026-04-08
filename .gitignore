@@ -17,4 +17,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 data/processed_audio/
-features/
+
+# Keep features directory but ignore its contents
+features/**
+!features/.gitkeep
