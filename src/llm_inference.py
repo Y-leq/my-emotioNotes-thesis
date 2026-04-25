@@ -1,18 +1,19 @@
 """
 LLM 情感推理（Demo）
 
-输入：data/descriptions/test_descriptions_dummy.csv
-输出：data/emotions/llm_predictions_test.csv
+输入：data/descriptions/test_descriptions_real.csv（或 dummy）
+输出：data/emotions/llm_predictions_{prompts.version}.csv（由 config.yaml 的 prompts.version 决定，如 v3）
 
 说明：
 - 先用占位描述跑通全链路，后续接入真实音频模型生成的描述时，保持输入 CSV 字段不变即可复用。
+- provider=openai 时使用 OpenAI 官方 API（或 compatible 的 base_url）；
 - provider=aliyun 时使用通义千问 DashScope OpenAI 兼容接口；
-  provider=gitcode 时使用 api-ai.gitcode.com；provider=atomgit 时使用 AtomGit。
-- API Key 通过环境变量（如 ALIYUN_API_KEY/GITCODE_API_KEY/ATOMGIT_API_KEY）
-  或 config.yaml 的 llm.api_key 配置。
+- provider=gitcode 时使用 api-ai.gitcode.com；provider=atomgit 时使用 AtomGit。
+- API Key 通过环境变量（OPENAI_API_KEY/ALIYUN_API_KEY 等）或 config.yaml 的 llm.api_key（勿提交密钥到仓库）。
 """
 
 import json
+import math
 import os
 import re
 import time
@@ -24,6 +25,9 @@ import pandas as pd
 import requests
 import yaml
 from tqdm import tqdm
+
+from emotion_label_mapping import map_valence_arousal_to_label
+from prompt_loader import load_optional
 
 
 def load_config(config_path=None):
@@ -54,21 +58,55 @@ def extract_first_json_obj(text):
         return None
 
 
-def build_prompt(description):
+def build_prompt_legacy(description):
+    """未配置 prompts 文件时的内置模板：仅输出 valence/arousal，label 由代码映射。"""
     system = (
         "你是音乐情感分析专家。你将收到一段对音乐片段的文字描述，"
-        "请根据描述推断该片段的情感维度：Valence(愉悦度) 与 Arousal(唤醒度)。"
+        "请根据描述推断 Valence(愉悦度) 与 Arousal(唤醒度)。"
         "DEAM 常用 1~9 标度：1=很低，9=很高。"
-        "请只输出 JSON，不要输出其他文字。"
+        "只输出 JSON，且仅包含 valence、arousal 两个键，不要输出 label。"
     )
     user = (
         "请基于以下音乐描述推断情感：\n\n"
         f"描述：{description}\n\n"
         "输出 JSON 格式如下（数值保留 2 位小数）：\n"
-        '{\n  "valence": 0.00,\n  "arousal": 0.00,\n  "label": "快乐/悲伤/平静/激昂/紧张/放松/其他"\n}\n'
+        '{"valence": 0.00, "arousal": 0.00}\n'
         "其中 valence/arousal 取值范围为 1~9。"
     )
     return system, user
+
+
+def _parse_va_from_dict(parsed):
+    """从模型返回的 dict 中解析 valence/arousal；失败返回 (None, None)。"""
+    if not isinstance(parsed, dict):
+        return None, None
+    try:
+        v = float(parsed.get("valence"))
+        a = float(parsed.get("arousal"))
+    except (TypeError, ValueError):
+        return None, None
+    if not (math.isfinite(v) and math.isfinite(a)):
+        return None, None
+    return v, a
+
+
+def build_prompt(description, project_root: Path, config: dict):
+    """
+    优先从 config.yaml 的 prompts 节加载 system / user 模板；否则使用 build_prompt_legacy。
+    返回 (system_msg, user_msg, prompt_version)。
+    """
+    prompts_cfg = config.get("prompts") or {}
+    version = str(prompts_cfg.get("version", "v1"))
+    sys_text = load_optional(project_root, prompts_cfg.get("llm_system_file"))
+    usr_tpl = load_optional(project_root, prompts_cfg.get("llm_user_template_file"))
+    if sys_text and usr_tpl:
+        if "<<<DESCRIPTION>>>" in usr_tpl:
+            user_msg = usr_tpl.replace("<<<DESCRIPTION>>>", description)
+        else:
+            user_msg = usr_tpl.replace("{description}", description)
+        return sys_text, user_msg, version
+    s, u = build_prompt_legacy(description)
+    return s, u, version
 
 
 def call_aliyun_api(system_msg, user_msg, api_key, model, temperature, max_tokens, base_url=None):
@@ -218,8 +256,10 @@ def call_atomgit_api(system_msg, user_msg, api_key, model, temperature, max_toke
 
 
 def get_api_key(llm_cfg):
-    provider = (llm_cfg or {}).get("provider", "")
-    if provider == "atomgit":
+    provider = (llm_cfg or {}).get("provider", "").strip().lower()
+    if provider == "openai":
+        env_key = os.environ.get("OPENAI_API_KEY")
+    elif provider == "atomgit":
         env_key = os.environ.get("ATOMGIT_API_KEY")
     elif provider == "gitcode":
         env_key = os.environ.get("GITCODE_API_KEY")
@@ -241,8 +281,9 @@ def run(config_path=None):
     llm_cfg = config.get("llm", {})
     api_key = get_api_key(llm_cfg)
     if not api_key:
+        hint = "OPENAI_API_KEY" if (llm_cfg.get("provider") or "").strip().lower() == "openai" else "ALIYUN_API_KEY 等"
         raise RuntimeError(
-            "未配置 API Key。请设置环境变量（如 ALIYUN_API_KEY）或在 config.yaml 的 llm.api_key 中填写。"
+            f"未配置 API Key。请设置环境变量（如 {hint}）或在 config.yaml 的 llm.api_key 中填写（勿提交仓库）。"
         )
 
     model = llm_cfg.get("model_name", "qwen-plus")
@@ -267,7 +308,8 @@ def run(config_path=None):
             f"未找到输入描述文件：{real_path} 或 {dummy_path}，请先运行 audio_to_text.py"
         )
 
-    out_path = emotions_dir / "llm_predictions_test.csv"
+    prompt_ver = str((config.get("prompts") or {}).get("version", "v1")).strip() or "v1"
+    out_path = emotions_dir / f"llm_predictions_{prompt_ver}.csv"
 
     df = pd.read_csv(in_path)
     required_cols = {"segment_id", "song_id", "audio_path", "description_raw"}
@@ -291,6 +333,10 @@ def run(config_path=None):
             done_ids = set()
 
     buffer_records = []
+    print(
+        f"[INFO] 提示词版本: {prompt_ver}，输出: {out_path.name}；"
+        f"评测/作图请使用同版本: python src/eval_llm_predictions.py 与 python src/plot_eval_results.py"
+    )
     print(f"[INFO] 开始对测试集 {len(df)} 条样本进行 LLM 情感推理...")
 
     for _, row in tqdm(df.iterrows(), total=len(df)):
@@ -299,7 +345,7 @@ def run(config_path=None):
             continue
 
         description = str(row["description_raw"])
-        system_msg, user_msg = build_prompt(description)
+        system_msg, user_msg, prompt_ver = build_prompt(description, project_root, config)
 
         t0 = time.time()
         if provider == "gitcode":
@@ -308,7 +354,18 @@ def run(config_path=None):
             )
         elif provider == "atomgit":
             raw = call_atomgit_api(system_msg, user_msg, api_key, model, temperature, max_tokens)
-        else:  # 默认使用阿里云通义千问（OpenAI 兼容接口）
+        elif provider == "openai":
+            # OpenAI 官方或任意 OpenAI 兼容 /chat/completions 端点
+            raw = call_aliyun_api(
+                system_msg,
+                user_msg,
+                api_key,
+                model,
+                temperature,
+                max_tokens,
+                base_url=base_url or "https://api.openai.com/v1",
+            )
+        else:  # aliyun 等：默认通义千问（OpenAI 兼容接口）
             raw = call_aliyun_api(
                 system_msg, user_msg, api_key, model, temperature, max_tokens, base_url=base_url
             )
@@ -318,27 +375,33 @@ def run(config_path=None):
         pred_valence = None
         pred_arousal = None
         pred_label = None
-        if isinstance(parsed, dict):
-            pred_valence = parsed.get("valence")
-            pred_arousal = parsed.get("arousal")
-            pred_label = parsed.get("label")
+        pred_label_llm = None
+        pv, pa = _parse_va_from_dict(parsed)
+        if pv is not None:
+            pred_valence = round(pv, 4)
+            pred_arousal = round(pa, 4)
+            pred_label = map_valence_arousal_to_label(pv, pa)
+        if isinstance(parsed, dict) and parsed.get("label") is not None:
+            pred_label_llm = str(parsed.get("label")).strip() or None
 
-        buffer_records.append(
-            {
-                "segment_id": seg_id,
-                "song_id": int(row["song_id"]),
-                "audio_path": row["audio_path"],
-                "description_raw": description,
-                "gt_valence_mean": row.get("valence_mean"),
-                "gt_arousal_mean": row.get("arousal_mean"),
-                "pred_valence": pred_valence,
-                "pred_arousal": pred_arousal,
-                "pred_label": pred_label,
-                "raw_output": raw,
-                "latency_ms": latency_ms,
-                "llm_model": model,
-            }
-        )
+        rec = {
+            "segment_id": seg_id,
+            "song_id": int(row["song_id"]),
+            "audio_path": row["audio_path"],
+            "description_raw": description,
+            "gt_valence_mean": row.get("valence_mean"),
+            "gt_arousal_mean": row.get("arousal_mean"),
+            "pred_valence": pred_valence,
+            "pred_arousal": pred_arousal,
+            "pred_label": pred_label,
+            "raw_output": raw,
+            "latency_ms": latency_ms,
+            "llm_model": model,
+            "prompt_version": prompt_ver,
+        }
+        if pred_label_llm:
+            rec["pred_label_llm"] = pred_label_llm
+        buffer_records.append(rec)
 
         # 轻量限速，避免瞬间打爆（可按需调整）
         time.sleep(0.2)

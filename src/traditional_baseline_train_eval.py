@@ -1,19 +1,3 @@
-"""
-传统声学特征基线训练与评估
-
-目的：
-- 读取 features/features/{segment_id}.csv 作为传统声学特征；
-- 读取 data/descriptions/test_descriptions_real.csv（优先）或 dummy 作为评估集（segment_id + gt valence/arousal）；
-- 使用训练集（data/splits/train_segments.csv）训练：
-  - 回归器：预测 valence_mean / arousal_mean
-  - 分类器：预测离散情感类别（快乐/悲伤/平静/激昂/紧张/放松/其他）
-- 输出：
-  - results/traditional_baseline_eval_summary.json
-  - results/traditional_baseline_by_row.csv
-
-与现有绘图脚本 results/plot_eval_results.py 的字段保持一致。
-"""
-
 from __future__ import annotations
 
 import json
@@ -24,71 +8,78 @@ import numpy as np
 import pandas as pd
 
 from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+from emotion_label_mapping import map_valence_arousal_to_label
 
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def map_valence_arousal_to_label(valence: float, arousal: float) -> str:
-    """
-    将连续 Valence/Arousal 映射到离散类别。
-    采用固定阈值（与当前你已有结果的风格一致，便于论文解释）。
-    """
-    val_low = 4.5
-    val_high = 6.0
-    ar_low = 4.5
-    ar_high = 6.0
-
-    is_val_low = valence <= val_low
-    is_val_high = valence >= val_high
-    is_ar_low = arousal <= ar_low
-    is_ar_high = arousal >= ar_high
-
-    # 高唤醒（arousal high）
-    if is_ar_high:
-        if is_val_high:
-            return "快乐"
-        if is_val_low:
-            return "紧张"
-        return "激昂"
-
-    # 低唤醒（arousal low）
-    if is_ar_low:
-        if is_val_high:
-            return "放松"
-        if is_val_low:
-            return "悲伤"
-        return "平静"
-
-    # 中唤醒（arousal mid）
-    if is_val_high:
-        return "放松"
-    if is_val_low:
-        return "紧张"
-    return "平静"
+def safe_pearson(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if len(y_true) < 2:
+        return 0.0
+    if np.std(y_true) < 1e-8 or np.std(y_pred) < 1e-8:
+        return 0.0
+    val = np.corrcoef(y_true, y_pred)[0, 1]
+    if np.isnan(val):
+        return 0.0
+    return float(val)
 
 
-def _safe_mean_series_from_feature_csv(
-    feature_path: Path, *, expected_cols: Optional[List[str]] = None
+def mae(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    return float(np.mean(np.abs(y_true - y_pred)))
+
+
+def rmse(y_true, y_pred) -> float:
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+
+
+def build_segment_feature_vector(
+    feature_path: Path,
+    *,
+    expected_cols: Optional[List[str]] = None,
+    sep: str = ";",
 ) -> Tuple[pd.Series, List[str]]:
     """
-    从 features/{id}.csv 读取特征，并对“时间维度行”取均值得到一个片段级向量。
+    将单个 segment 的逐帧特征 csv 聚合为片段级统计特征向量。
+    使用 mean/std/min/max/median 五种统计量。
     """
-    df = pd.read_csv(feature_path, sep=";")
-
-    # 取数值列并求均值；若存在非数值列，自动剔除
+    df = pd.read_csv(feature_path, sep=sep)
     num_df = df.select_dtypes(include=[np.number])
-    mean_series = num_df.mean(axis=0)
 
-    cols = mean_series.index.tolist()
+    if num_df.shape[1] == 0:
+        raise ValueError(f"文件中没有数值特征列: {feature_path}")
+
+    feats: Dict[str, float] = {}
+
+    for col in num_df.columns:
+        arr = num_df[col].to_numpy(dtype=float)
+        if arr.size == 0:
+            continue
+
+        feats[f"{col}__mean"] = float(np.mean(arr))
+        feats[f"{col}__std"] = float(np.std(arr))
+        feats[f"{col}__min"] = float(np.min(arr))
+        feats[f"{col}__max"] = float(np.max(arr))
+        feats[f"{col}__median"] = float(np.median(arr))
+
+    series = pd.Series(feats, dtype=float)
+    cols = series.index.tolist()
+
     if expected_cols is None:
-        return mean_series, cols
+        return series, cols
 
-    # 对齐列：缺失置 0，多余忽略
-    aligned = mean_series.reindex(expected_cols).fillna(0.0)
+    aligned = series.reindex(expected_cols).fillna(0.0)
     return aligned, expected_cols
 
 
@@ -97,160 +88,276 @@ def load_features_for_segment_ids(
     feature_dir: Path,
     *,
     expected_cols: Optional[List[str]] = None,
-) -> Tuple[np.ndarray, List[int], List[str]]:
+    sep: str = ";",
+) -> Tuple[np.ndarray, List[int], List[str], List[int]]:
     """
-    返回：
-    - X: (n, d)
-    - used_ids: 实际读取到特征的 ids
-    - cols: 特征列顺序（长度 d）
+    返回:
+    - X: 特征矩阵
+    - used_ids: 成功读取特征的 segment_id
+    - cols: 特征列名顺序
+    - missing_ids: 缺失特征文件的 segment_id
     """
     used_ids: List[int] = []
+    missing_ids: List[int] = []
     vectors: List[pd.Series] = []
     cols: Optional[List[str]] = expected_cols
 
     for sid in segment_ids:
         fpath = feature_dir / f"{sid}.csv"
         if not fpath.exists():
+            missing_ids.append(int(sid))
             continue
 
-        if cols is None:
-            mean_series, cols = _safe_mean_series_from_feature_csv(fpath, expected_cols=None)
-        else:
-            mean_series, _ = _safe_mean_series_from_feature_csv(fpath, expected_cols=cols)
+        try:
+            if cols is None:
+                feat_series, cols = build_segment_feature_vector(
+                    fpath,
+                    expected_cols=None,
+                    sep=sep,
+                )
+            else:
+                feat_series, _ = build_segment_feature_vector(
+                    fpath,
+                    expected_cols=cols,
+                    sep=sep,
+                )
+        except Exception as e:
+            print(f"[WARN] 读取特征失败 sid={sid}: {e}")
+            missing_ids.append(int(sid))
+            continue
 
         used_ids.append(int(sid))
-        vectors.append(mean_series)
+        vectors.append(feat_series)
 
-    if cols is None:
-        raise RuntimeError(f"没有成功读取到任何特征文件：feature_dir={feature_dir}")
+    if cols is None or len(vectors) == 0:
+        raise RuntimeError(f"没有成功读取到任何特征文件: {feature_dir}")
 
     X = np.vstack([v.to_numpy(dtype=float) for v in vectors])
-    return X, used_ids, cols
+    return X, used_ids, cols, missing_ids
+
+
+def make_regressor(name: str, random_seed: int):
+    name = name.lower()
+    if name == "ridge":
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("reg", Ridge(alpha=1.0))
+        ])
+    elif name == "rf":
+        return RandomForestRegressor(
+            n_estimators=300,
+            max_depth=None,
+            min_samples_split=2,
+            min_samples_leaf=1,
+            random_state=random_seed,
+            n_jobs=-1,
+        )
+    else:
+        raise ValueError(f"不支持的 regressor: {name}")
+
+
+def make_classifier(name: str, random_seed: int):
+    name = name.lower()
+    if name == "logreg":
+        return Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(
+                max_iter=3000,
+                class_weight="balanced",
+                random_state=random_seed
+            ))
+        ])
+    elif name == "rf":
+        return RandomForestClassifier(
+            n_estimators=300,
+            max_depth=None,
+            random_state=random_seed,
+            n_jobs=-1,
+            class_weight="balanced",
+        )
+    else:
+        raise ValueError(f"不支持的 classifier: {name}")
 
 
 def main(
     *,
     feature_dir: Optional[str] = None,
-    n_train_used: int = 300,
+    eval_desc_file: Optional[str] = None,
+    n_train_used: Optional[int] = None,   # 默认全量
     random_seed: int = 42,
+    regressor_name: str = "ridge",        # ridge / rf
+    classifier_name: str = "logreg",      # logreg / rf
+    feature_sep: str = ";",
 ) -> None:
     root = _project_root()
     feature_dir_path = Path(feature_dir) if feature_dir is not None else (root / "features" / "features")
 
-    # 评估集：尽量与 llm_inference 使用的描述文件一致（small samples）
-    desc_real = root / "data" / "descriptions" / "test_descriptions_real.csv"
-    desc_dummy = root / "data" / "descriptions" / "test_descriptions_dummy.csv"
-    if desc_real.exists():
-        eval_desc_path = desc_real
-    elif desc_dummy.exists():
-        eval_desc_path = desc_dummy
+    # ===== 读取评估集 =====
+    if eval_desc_file is not None:
+        eval_desc_path = Path(eval_desc_file)
     else:
-        raise FileNotFoundError(f"未找到评估描述文件：{desc_real} 或 {desc_dummy}")
+        desc_real = root / "data" / "descriptions" / "test_descriptions_real.csv"
+        desc_dummy = root / "data" / "descriptions" / "test_descriptions_dummy.csv"
+        if desc_real.exists():
+            eval_desc_path = desc_real
+        elif desc_dummy.exists():
+            eval_desc_path = desc_dummy
+        else:
+            raise FileNotFoundError(f"未找到评估描述文件: {desc_real} 或 {desc_dummy}")
 
     eval_df = pd.read_csv(eval_desc_path)
-    if not {"segment_id", "gt_valence_mean", "gt_arousal_mean", "valence_mean", "arousal_mean"}.intersection(eval_df.columns):
-        # 你的描述文件是 valence_mean/arousal_mean
-        pass
 
-    required_cols = {"segment_id", "valence_mean", "arousal_mean"}
-    missing = required_cols - set(eval_df.columns)
-    if missing:
-        raise RuntimeError(f"评估描述文件缺少必要列：{missing}")
+    required_eval_cols = {"segment_id", "valence_mean", "arousal_mean"}
+    missing_eval = required_eval_cols - set(eval_df.columns)
+    if missing_eval:
+        raise RuntimeError(f"评估文件缺少必要列: {missing_eval}")
 
-    eval_segment_ids = eval_df["segment_id"].astype(int).tolist()
-    eval_y_valence = eval_df.set_index("segment_id")["valence_mean"].to_dict()
-    eval_y_arousal = eval_df.set_index("segment_id")["arousal_mean"].to_dict()
-    eval_gt_labels = {int(sid): map_valence_arousal_to_label(float(eval_y_valence[sid]), float(eval_y_arousal[sid])) for sid in eval_segment_ids if sid in eval_y_valence and sid in eval_y_arousal}
+    eval_df = eval_df.copy()
+    eval_df["segment_id"] = eval_df["segment_id"].astype(int)
 
-    # 训练集标签：来自 train_segments.csv
+    eval_segment_ids = eval_df["segment_id"].tolist()
+    eval_y_valence_map = eval_df.set_index("segment_id")["valence_mean"].to_dict()
+    eval_y_arousal_map = eval_df.set_index("segment_id")["arousal_mean"].to_dict()
+
+    eval_gt_labels_map = {
+        int(sid): map_valence_arousal_to_label(
+            float(eval_y_valence_map[sid]),
+            float(eval_y_arousal_map[sid]),
+        )
+        for sid in eval_segment_ids
+    }
+
+    # ===== 读取训练集 =====
     train_path = root / "data" / "splits" / "train_segments.csv"
     if not train_path.exists():
-        raise FileNotFoundError(f"未找到训练集划分文件：{train_path}")
-    train_df = pd.read_csv(train_path)
-    if not {"segment_id", "valence_mean", "arousal_mean"}.issubset(set(train_df.columns)):
-        raise RuntimeError("train_segments.csv 缺少必要列 segment_id/valence_mean/arousal_mean")
+        raise FileNotFoundError(f"未找到训练集划分文件: {train_path}")
 
-    train_segment_ids_all = train_df["segment_id"].astype(int).tolist()
+    train_df = pd.read_csv(train_path)
+    required_train_cols = {"segment_id", "valence_mean", "arousal_mean"}
+    missing_train = required_train_cols - set(train_df.columns)
+    if missing_train:
+        raise RuntimeError(f"train_segments.csv 缺少必要列: {missing_train}")
+
+    train_df = train_df.copy()
+    train_df["segment_id"] = train_df["segment_id"].astype(int)
+
+    # ===== 无泄漏检查 =====
+    train_ids_all = set(train_df["segment_id"].tolist())
+    eval_ids_all = set(eval_segment_ids)
+    overlap = train_ids_all & eval_ids_all
+    if len(overlap) > 0:
+        raise RuntimeError(
+            f"发现训练集与评估集 segment_id 重叠，存在数据泄漏风险，重叠数量={len(overlap)}，部分样例={list(sorted(overlap))[:10]}"
+        )
+
+    train_segment_ids_all = train_df["segment_id"].tolist()
     train_y_valence_map = train_df.set_index("segment_id")["valence_mean"].to_dict()
     train_y_arousal_map = train_df.set_index("segment_id")["arousal_mean"].to_dict()
     train_y_labels_map = {
-        int(sid): map_valence_arousal_to_label(float(train_y_valence_map[sid]), float(train_y_arousal_map[sid]))
+        int(sid): map_valence_arousal_to_label(
+            float(train_y_valence_map[sid]),
+            float(train_y_arousal_map[sid]),
+        )
         for sid in train_segment_ids_all
-        if sid in train_y_valence_map and sid in train_y_arousal_map
     }
 
+    # ===== 可选抽样 =====
     rng = np.random.default_rng(random_seed)
     if n_train_used is not None and len(train_segment_ids_all) > n_train_used:
-        train_segment_ids_all = rng.choice(train_segment_ids_all, size=n_train_used, replace=False).astype(int).tolist()
+        train_segment_ids_all = rng.choice(
+            train_segment_ids_all,
+            size=n_train_used,
+            replace=False
+        ).astype(int).tolist()
 
-    # ========= 读取特征并构建 X =========
-    # 为了保证列一致：先读取训练特征决定 expected_cols，再读取评估特征对齐
-    X_train, used_train_ids, cols = load_features_for_segment_ids(
-        train_segment_ids_all, feature_dir_path, expected_cols=None
+    # ===== 读取训练特征 =====
+    X_train, used_train_ids, feat_cols, train_missing_ids = load_features_for_segment_ids(
+        train_segment_ids_all,
+        feature_dir_path,
+        expected_cols=None,
+        sep=feature_sep,
     )
 
-    X_eval, used_eval_ids, _cols2 = load_features_for_segment_ids(
-        eval_segment_ids, feature_dir_path, expected_cols=cols
+    # ===== 读取评估特征（列对齐到训练特征） =====
+    X_eval, used_eval_ids, _, eval_missing_ids = load_features_for_segment_ids(
+        eval_segment_ids,
+        feature_dir_path,
+        expected_cols=feat_cols,
+        sep=feature_sep,
     )
 
-    # 如果某些 eval 片段缺失特征，则丢弃
-    used_eval_y_valence = np.array([eval_y_valence[sid] for sid in used_eval_ids], dtype=float)
-    used_eval_y_arousal = np.array([eval_y_arousal[sid] for sid in used_eval_ids], dtype=float)
-    used_eval_y_labels = [eval_gt_labels[sid] for sid in used_eval_ids]
+    if len(used_eval_ids) == 0:
+        raise RuntimeError("评估集没有任何可用特征样本，无法评估。")
 
-    # ========= 模型训练 =========
-    # 回归：valence / arousal
-    valence_reg = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=1.0, random_state=random_seed))])
-    arousal_reg = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=1.0, random_state=random_seed))])
-    valence_reg.fit(X_train, np.array([train_y_valence_map[sid] for sid in used_train_ids], dtype=float))
-    arousal_reg.fit(X_train, np.array([train_y_arousal_map[sid] for sid in used_train_ids], dtype=float))
+    # ===== 构建 y =====
+    y_train_valence = np.array([train_y_valence_map[sid] for sid in used_train_ids], dtype=float)
+    y_train_arousal = np.array([train_y_arousal_map[sid] for sid in used_train_ids], dtype=float)
+    y_train_label = [train_y_labels_map[sid] for sid in used_train_ids]
 
-    # 分类：离散情感标签
-    clf = Pipeline(
-        [
-            ("scaler", StandardScaler()),
-            ("clf", LogisticRegression(max_iter=2000, multi_class="auto", random_state=random_seed)),
-        ]
-    )
-    clf.fit(X_train, [train_y_labels_map[sid] for sid in used_train_ids])
+    y_eval_valence = np.array([eval_y_valence_map[sid] for sid in used_eval_ids], dtype=float)
+    y_eval_arousal = np.array([eval_y_arousal_map[sid] for sid in used_eval_ids], dtype=float)
+    y_eval_label = [eval_gt_labels_map[sid] for sid in used_eval_ids]
 
-    # ========= 预测 =========
-    pred_valence = valence_reg.predict(X_eval).astype(float)
-    pred_arousal = arousal_reg.predict(X_eval).astype(float)
-    pred_labels_from_reg = [map_valence_arousal_to_label(v, a) for v, a in zip(pred_valence, pred_arousal)]
+    # ===== 模型训练 =====
+    valence_reg = make_regressor(regressor_name, random_seed)
+    arousal_reg = make_regressor(regressor_name, random_seed)
+    clf = make_classifier(classifier_name, random_seed)
+
+    valence_reg.fit(X_train, y_train_valence)
+    arousal_reg.fit(X_train, y_train_arousal)
+    clf.fit(X_train, y_train_label)
+
+    # ===== 预测 =====
+    pred_valence = np.asarray(valence_reg.predict(X_eval), dtype=float)
+    pred_arousal = np.asarray(arousal_reg.predict(X_eval), dtype=float)
+
+    # clip 到 DEAM 合法范围 [1, 9]
+    pred_valence = np.clip(pred_valence, 1.0, 9.0)
+    pred_arousal = np.clip(pred_arousal, 1.0, 9.0)
+
+    pred_labels_from_reg = [
+        map_valence_arousal_to_label(v, a)
+        for v, a in zip(pred_valence, pred_arousal)
+    ]
     pred_labels_from_clf = clf.predict(X_eval).astype(str).tolist()
 
-    # ========= 指标计算 =========
-    def mae(y_true, y_pred):
-        return float(np.mean(np.abs(y_true - y_pred)))
+    # ===== 指标 =====
+    valence_mae = mae(y_eval_valence, pred_valence)
+    valence_rmse = rmse(y_eval_valence, pred_valence)
+    valence_pearson = safe_pearson(y_eval_valence, pred_valence)
 
-    def rmse(y_true, y_pred):
-        return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    arousal_mae = mae(y_eval_arousal, pred_arousal)
+    arousal_rmse = rmse(y_eval_arousal, pred_arousal)
+    arousal_pearson = safe_pearson(y_eval_arousal, pred_arousal)
 
-    def pearson(y_true, y_pred):
-        y_true = np.asarray(y_true, dtype=float)
-        y_pred = np.asarray(y_pred, dtype=float)
-        if len(y_true) < 2:
-            return 0.0
-        return float(np.corrcoef(y_true, y_pred)[0, 1])
+    label_acc_reg = float(np.mean(
+        np.array(pred_labels_from_reg, dtype=str) == np.array(y_eval_label, dtype=str)
+    ))
+    label_acc_clf = float(np.mean(
+        np.array(pred_labels_from_clf, dtype=str) == np.array(y_eval_label, dtype=str)
+    ))
 
-    valence_mae = mae(used_eval_y_valence, pred_valence)
-    valence_rmse = rmse(used_eval_y_valence, pred_valence)
-    valence_pearson = pearson(used_eval_y_valence, pred_valence)
+    # ===== 类别分布诊断 =====
+    train_label_dist = pd.Series(y_train_label).value_counts().to_dict()
+    eval_label_dist = pd.Series(y_eval_label).value_counts().to_dict()
 
-    arousal_mae = mae(used_eval_y_arousal, pred_arousal)
-    arousal_rmse = rmse(used_eval_y_arousal, pred_arousal)
-    arousal_pearson = pearson(used_eval_y_arousal, pred_arousal)
-
-    label_acc_reg = float(np.mean(np.array(pred_labels_from_reg, dtype=str) == np.array(used_eval_y_labels, dtype=str)))
-    label_acc_clf = float(np.mean(np.array(pred_labels_from_clf, dtype=str) == np.array(used_eval_y_labels, dtype=str)))
-
-    # ========= 写结果 =========
+    # ===== 输出 =====
     results_dir = root / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
 
     summary = {
-        "n_eval": int(len(used_eval_ids)),
+        "n_train_requested": None if n_train_used is None else int(n_train_used),
+        "n_train_used": int(len(used_train_ids)),
+        "n_eval_requested": int(len(eval_segment_ids)),
+        "n_eval_used": int(len(used_eval_ids)),
+        "n_train_missing_features": int(len(train_missing_ids)),
+        "n_eval_missing_features": int(len(eval_missing_ids)),
+        "feature_dim": int(X_train.shape[1]),
+        "feature_dir": str(feature_dir_path),
+        "eval_desc_file": str(eval_desc_path),
+        "regressor_name": regressor_name,
+        "classifier_name": classifier_name,
+        "random_seed": int(random_seed),
         "valence_mae": valence_mae,
         "valence_rmse": valence_rmse,
         "valence_pearson": valence_pearson,
@@ -259,26 +366,27 @@ def main(
         "arousal_pearson": arousal_pearson,
         "label_accuracy_from_reg": label_acc_reg,
         "label_accuracy_from_clf": label_acc_clf,
-        "n_train_used": int(len(used_train_ids)),
-        "feature_dir": str(feature_dir_path),
+        "train_label_distribution": train_label_dist,
+        "eval_label_distribution": eval_label_dist,
     }
 
-    (results_dir / "traditional_baseline_eval_summary.json").write_text(
+    summary_path = results_dir / "traditional_baseline_eval_summary.json"
+    summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
     rows = []
-    for sid, gv, ga, pv, pa, grl, pcl in zip(
+    for sid, gv, ga, pv, pa, pl_reg, pl_clf in zip(
         used_eval_ids,
-        used_eval_y_valence,
-        used_eval_y_arousal,
+        y_eval_valence,
+        y_eval_arousal,
         pred_valence,
         pred_arousal,
         pred_labels_from_reg,
         pred_labels_from_clf,
     ):
-        gt_label_mapped = eval_gt_labels[int(sid)]
+        gt_label = eval_gt_labels_map[int(sid)]
         rows.append(
             {
                 "segment_id": int(sid),
@@ -286,25 +394,42 @@ def main(
                 "gt_arousal_mean": float(ga),
                 "pred_valence": float(pv),
                 "pred_arousal": float(pa),
-                "gt_label_mapped": gt_label_mapped,
-                "pred_label_from_reg": grl,
-                "pred_label_from_clf": str(pcl),
+                "gt_label_mapped": gt_label,
+                "pred_label_from_reg": str(pl_reg),
+                "pred_label_from_clf": str(pl_clf),
                 "valence_abs_error": float(abs(gv - pv)),
                 "arousal_abs_error": float(abs(ga - pa)),
-                "label_match_reg": int(grl == gt_label_mapped),
-                "label_match_clf": int(str(pcl) == gt_label_mapped),
+                "label_match_reg": int(str(pl_reg) == gt_label),
+                "label_match_clf": int(str(pl_clf) == gt_label),
             }
         )
 
     by_row_df = pd.DataFrame(rows).sort_values(by="segment_id")
-    by_row_df.to_csv(results_dir / "traditional_baseline_by_row.csv", index=False, encoding="utf-8-sig")
+    by_row_path = results_dir / "traditional_baseline_by_row.csv"
+    by_row_df.to_csv(by_row_path, index=False, encoding="utf-8-sig")
 
-    print("[INFO] 传统基线评估完成：")
-    print(f"  - {results_dir / 'traditional_baseline_eval_summary.json'}")
-    print(f"  - {results_dir / 'traditional_baseline_by_row.csv'}")
+    # 额外导出本次真实参与评估的 segment_id，便于和你的 pipeline 对齐
+    used_eval_ids_path = results_dir / "traditional_baseline_used_eval_ids.csv"
+    pd.DataFrame({"segment_id": used_eval_ids}).to_csv(
+        used_eval_ids_path,
+        index=False,
+        encoding="utf-8-sig"
+    )
+
+    print("[INFO] 传统声学特征基线评估完成")
+    print(f"[INFO] summary: {summary_path}")
+    print(f"[INFO] by_row:   {by_row_path}")
+    print(f"[INFO] used_ids: {used_eval_ids_path}")
+    print(f"[INFO] n_train_used={len(used_train_ids)}, n_eval_used={len(used_eval_ids)}, feature_dim={X_train.shape[1]}")
+    print(f"[INFO] valence: MAE={valence_mae:.4f}, RMSE={valence_rmse:.4f}, Pearson={valence_pearson:.4f}")
+    print(f"[INFO] arousal: MAE={arousal_mae:.4f}, RMSE={arousal_rmse:.4f}, Pearson={arousal_pearson:.4f}")
+    print(f"[INFO] label acc (from reg)={label_acc_reg:.4f}, label acc (from clf)={label_acc_clf:.4f}")
 
 
 if __name__ == "__main__":
-    # 默认参数：与你历史 results 的风格一致
-    main(n_train_used=300, random_seed=42)
-
+    main(
+        n_train_used=None,        # 建议先全量训练
+        random_seed=42,
+        regressor_name="ridge",   # 可改为 "rf"
+        classifier_name="logreg", # 可改为 "rf"
+    )

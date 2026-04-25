@@ -17,6 +17,21 @@ import soundfile as sf
 import yaml
 from tqdm import tqdm
 
+from prompt_loader import load_optional
+
+
+def _default_audio_instruction_prompt() -> str:
+    """config 未配置提示词文件时的内置默认（与早期版本一致）。"""
+    return (
+        "你是音乐内容分析助手。请仅基于音频内容生成中文描述，避免臆测。"
+        "描述必须覆盖5个维度：旋律、节奏、乐器、曲风、整体听感。"
+        "输出要求："
+        "1) 只输出一段话（80-140字）；"
+        "2) 用分号“；”分成5个短句，每个短句对应一个维度；"
+        "3) 不使用列表、标题、JSON或markdown；"
+        "4) 不确定的信息请用“可能/偏向/疑似”等保守措辞。"
+    )
+
 
 def load_config(config_path=None):
     if config_path is None:
@@ -50,6 +65,7 @@ class AudioToTextModel:
         max_tokens=220,
         request_timeout=180,
         clip_seconds=30,
+        instruction_prompt=None,
     ):
         self.model_name = model_name
         self.provider = provider
@@ -59,6 +75,7 @@ class AudioToTextModel:
         self.max_tokens = max_tokens
         self.request_timeout = request_timeout
         self.clip_seconds = int(clip_seconds)
+        self.instruction_prompt = (instruction_prompt or "").strip() or _default_audio_instruction_prompt()
 
     def _audio_to_data_url(self, audio_abs_path):
         """
@@ -83,15 +100,7 @@ class AudioToTextModel:
 
     def _call_dashscope(self, audio_abs_path):
         audio_data_url = self._audio_to_data_url(audio_abs_path)
-        prompt = (
-            "你是音乐内容分析助手。请仅基于音频内容生成中文描述，避免臆测。"
-            "描述必须覆盖5个维度：旋律、节奏、乐器、曲风、整体听感。"
-            "输出要求："
-            "1) 只输出一段话（80-140字）；"
-            "2) 用分号“；”分成5个短句，每个短句对应一个维度；"
-            "3) 不使用列表、标题、JSON或markdown；"
-            "4) 不确定的信息请用“可能/偏向/疑似”等保守措辞。"
-        )
+        prompt = self.instruction_prompt
         payload = {
             "model": self.model_name,
             "input": {
@@ -174,6 +183,18 @@ def run(config_path=None):
 
     model_cfg = config.get("audio_to_text", {})
     llm_cfg = config.get("llm", {})
+    prompts_cfg = config.get("prompts") or {}
+    prompt_version = str(prompts_cfg.get("version", ""))
+    audio_prompt_rel = prompts_cfg.get("audio_description_file")
+    instruction_prompt = None
+    if audio_prompt_rel:
+        instruction_prompt = load_optional(project_root, str(audio_prompt_rel))
+        if instruction_prompt is None:
+            print(
+                f"[WARN] 未找到音频描述提示词文件 {audio_prompt_rel}，使用内置默认提示词。"
+            )
+    if instruction_prompt is None:
+        instruction_prompt = _default_audio_instruction_prompt()
     model_name = model_cfg.get("model_name", "qwen2-audio-instruct")
     provider = str(model_cfg.get("provider", "dashscope")).lower()
     endpoint = model_cfg.get("endpoint") or "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
@@ -199,6 +220,7 @@ def run(config_path=None):
         max_tokens=max_tokens,
         request_timeout=request_timeout,
         clip_seconds=clip_seconds,
+        instruction_prompt=instruction_prompt,
     )
 
     records = []
@@ -207,16 +229,17 @@ def run(config_path=None):
         audio_rel = str(row["audio_path"])
         audio_abs = project_root / audio_rel
         desc = model.generate_description(str(audio_abs))
-        records.append(
-            {
-                "segment_id": row["segment_id"],
-                "song_id": row["song_id"],
-                "audio_path": audio_rel,
-                "valence_mean": row.get("valence_mean"),
-                "arousal_mean": row.get("arousal_mean"),
-                "description_raw": desc,
-            }
-        )
+        rec = {
+            "segment_id": row["segment_id"],
+            "song_id": row["song_id"],
+            "audio_path": audio_rel,
+            "valence_mean": row.get("valence_mean"),
+            "arousal_mean": row.get("arousal_mean"),
+            "description_raw": desc,
+        }
+        if prompt_version:
+            rec["prompt_version"] = prompt_version
+        records.append(rec)
 
     out_path = descriptions_dir / "test_descriptions_real.csv"
     pd.DataFrame(records).to_csv(out_path, index=False, encoding="utf-8-sig")

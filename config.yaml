@@ -25,22 +25,22 @@ audio_to_text:
   provider: "dashscope"
   model_name: "qwen2-audio-instruct"
   endpoint: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-  api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  api_key: "sk-xxxxx"
   temperature: 0.2
   max_tokens: 220
   clip_seconds: 30
-  max_samples: 10  # 小样本试跑；设为 null 则对测试集全量生成描述
+  max_samples: null  # null = 对测试集全部片段生成描述（约 180 条，耗时长、计费多）
   request_timeout: 180
   
-# LLM配置
+# LLM 配置（情感推理：二阶段大模型。OpenAI 请设置环境变量 OPENAI_API_KEY，勿将密钥提交到仓库）
 llm:
-  provider: "aliyun"  # aliyun | gitcode | atomgit | openai
-  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 通义千问 OpenAI 兼容接口
-  model_name: "qwen-plus"  # 与 test.py 中保持一致
-  api_key: "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"  # 建议使用环境变量 ALIYUN_API_KEY 覆盖
+  provider: "aliyun"  # aliyun | openai | gitcode | atomgit
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 官方；Azure/代理可改为对应兼容端点
+  model_name: "qwen-plus"  # 可改为 gpt-4o、gpt-4.1 等
+  api_key: "sk-xxxxx"  # 优先使用环境变量 OPENAI_API_KEY；仅本地调试可临时填写
   temperature: 0.7
   max_tokens: 200
-  max_samples: 10  # 与 audio_to_text 对齐；设为 null 则处理描述文件中的全部行
+  max_samples: null  # null = 处理描述文件中全部行（须先完成全量 test_descriptions_real.csv）
   
 # 质量评估配置
 quality_assessment:
@@ -57,6 +57,13 @@ output:
   splits_dir: "./data/splits"
   results_dir: "./results"
   
+# 提示词版本（写入 CSV，便于论文与全量实验对齐；修改 prompts 下文件后请递增 version）
+prompts:
+  version: "v3"
+  audio_description_file: "./prompts/audio_description_v2.txt"
+  llm_system_file: "./prompts/llm_emotion_system_v3.txt"
+  llm_user_template_file: "./prompts/llm_emotion_user_v3.txt"
+
 # 日志配置
 logging:
   level: "INFO"

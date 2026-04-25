@@ -1,10 +1,15 @@
 {
-  "n_eval": 10,
-  "valence_mae": 2.19,
-  "valence_rmse": 2.5894014752448102,
-  "valence_pearson": 0.034222238577545507,
-  "arousal_mae": 1.783,
-  "arousal_rmse": 2.0219025693638155,
-  "arousal_pearson": 0.22772734996739555,
-  "label_accuracy": 0.1
+  "n_input_rows": 181,
+  "n_eval": 181,
+  "n_skipped_invalid_pred": 0,
+  "n_label_scored": 181,
+  "valence_mae": 2.1254143646408843,
+  "valence_rmse": 2.3938341607033427,
+  "valence_pearson": 0.2745491474103956,
+  "arousal_mae": 1.6776243093922651,
+  "arousal_rmse": 2.012416293170122,
+  "arousal_pearson": 0.541670744837934,
+  "label_accuracy": 0.18232044198895028,
+  "predictions_path": "D:/Users/ylq/Desktop/毕设/EmotioNotes-Thesis/data/emotions/llm_predictions_test.csv",
+  "prompt_version": "v3"
 }

@@ -1,0 +1,8 @@
+请基于以下音乐描述推断 Valence 与 Arousal。数值须与描述整体一致，避免仅因个别褒义词就将两项都打高。
+
+描述：
+<<<DESCRIPTION>>>
+
+请严格输出如下 JSON（仅两键，数值保留两位小数）：
+{"valence": 0.00, "arousal": 0.00}
+其中 valence 与 arousal 必须在 1～9 之间（含边界）。
