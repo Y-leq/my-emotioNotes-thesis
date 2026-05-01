@@ -1,21 +1,18 @@
 """
-从分版本的 LLM 预测 CSV 生成论文/作图用评测表。
+从「按 prompts.version 命名」的 LLM 预测 CSV 生成论文/作图用评测表。
 
-输入（默认）: data/emotions/llm_predictions_{prompts.version}.csv
-  （与 config.yaml 中 prompts.version 一致；若不存在可回退 llm_predictions_test.csv）
-输出（默认）:
-- results/prompt_runs/{version}/llm_eval_by_row.csv
-- results/prompt_runs/{version}/llm_eval_summary.json
+输入（默认）: data/emotions/llm_predictions_test_{version}.csv
+输出（默认）: results/prompt_runs/{version}/llm_eval_by_row.csv、llm_eval_summary.json
 
-仅将「pred_valence / pred_arousal 可解析为有限数值」的行纳入回归指标与输出行，
-避免散点图 astype(float) 失败；统计信息中记录跳过条数。
+与 plot_eval_results.py 列一致。命令行可覆盖 --predictions / --out-dir。
+
+仅将「pred_valence / pred_arousal 可解析为有限数值」的行纳入回归指标与输出行。
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -24,25 +21,23 @@ import pandas as pd
 import yaml
 
 from emotion_label_mapping import map_valence_arousal_to_label
+from prompt_artifact_paths import (
+    apply_prompt_profile,
+    llm_predictions_csv,
+    llm_results_run_dir,
+    prompt_version_from_config,
+)
 
 
 def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _load_prompt_version_from_config(root: Path) -> str:
-    for p in (root / "config.yaml", Path("config.yaml")):
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            v = (cfg.get("prompts") or {}).get("version", "v1")
-            return str(v).strip() or "v1"
-    return "v1"
-
-
-def _version_from_predictions_filename(path: Path) -> Optional[str]:
-    m = re.match(r"^llm_predictions_(.+)\.csv$", path.name, re.I)
-    return m.group(1) if m else None
+def _load_config(config_path: Optional[Path] = None) -> dict:
+    root = _project_root()
+    path = config_path or (root / "config.yaml")
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 def _try_float(x: Any) -> Optional[float]:
@@ -93,43 +88,28 @@ def run(
     *,
     predictions_path: Optional[Path] = None,
     results_dir: Optional[Path] = None,
-    prompt_version: Optional[str] = None,
+    config: Optional[dict] = None,
 ) -> None:
     root = _project_root()
-    cfg_ver = _load_prompt_version_from_config(root)
-    ver = (prompt_version or cfg_ver).strip() or "v1"
-
+    cfg = config if config is not None else _load_config()
     if predictions_path is not None:
-        pred_path = Path(predictions_path).resolve()
-        inferred = _version_from_predictions_filename(pred_path)
-        if inferred is not None:
-            ver = inferred
+        pred_path = predictions_path
     else:
-        pred_path = root / "data" / "emotions" / f"llm_predictions_{ver}.csv"
-        if not pred_path.exists():
-            leg = root / "data" / "emotions" / "llm_predictions_test.csv"
-            if leg.exists():
-                print(
-                    f"[WARN] 未找到 {pred_path.name}，回退使用 {leg.name}。"
-                    f" 建议重命名为 llm_predictions_{ver}.csv 与 prompts.version 一致。"
-                )
-                pred_path = leg
-                ver = cfg_ver
-            else:
-                raise FileNotFoundError(
-                    f"未找到 LLM 预测文件: {pred_path}，请先运行 llm_inference.py（将生成按版本命名文件）。"
-                )
-
+        pred_path = llm_predictions_csv(root, cfg)
     if results_dir is not None:
-        out_dir = Path(results_dir).resolve()
+        out_dir = results_dir
     else:
-        out_dir = (root / "results" / "prompt_runs" / ver).resolve()
+        out_dir = llm_results_run_dir(root, cfg)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_csv = out_dir / "llm_eval_by_row.csv"
     out_json = out_dir / "llm_eval_summary.json"
 
     if not pred_path.exists():
-        raise FileNotFoundError(f"未找到 LLM 预测文件: {pred_path}，请先运行 llm_inference.py")
+        leg = root / "data" / "emotions" / "llm_predictions_test.csv"
+        hint = ""
+        if leg.exists():
+            hint = f" 若此前使用旧文件，可复制为当前版本名: copy {leg} -> {pred_path.name}"
+        raise FileNotFoundError(f"未找到 LLM 预测文件: {pred_path}。请先运行 llm_inference.py，或调整 config 中 prompts.version。{hint}")
 
     df = pd.read_csv(pred_path)
     required = {"segment_id", "gt_valence_mean", "gt_arousal_mean"}
@@ -206,9 +186,9 @@ def run(
         acc = 0.0
         n_label = 0
 
-    prompt_ver_meta = ""
-    if "prompt_version" in df.columns and len(df) > 0:
-        prompt_ver_meta = str(df["prompt_version"].dropna().iloc[0]) if df["prompt_version"].notna().any() else ""
+    prompt_ver_meta = prompt_version_from_config(cfg)
+    if "prompt_version" in df.columns and len(df) > 0 and df["prompt_version"].notna().any():
+        prompt_ver_meta = str(df["prompt_version"].dropna().iloc[0])
 
     summary = {
         "n_input_rows": n_input,
@@ -230,33 +210,38 @@ def run(
 
     print(f"[INFO] 评测样本: {len(out_df)} / 输入 {n_input}（跳过无效预测 {skipped}）")
     print(f"[INFO] 已写入: {out_csv}")
-    print(f"[INFO] 已写入: {out_json}")
-    print(f"[INFO] 提示词版本目录: {out_dir}（作图: python src/plot_eval_results.py --llm-version {ver}）")
+    print(f"[INFO] 已写入: {out_json}（提示词版本目录: {out_dir}）")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="LLM 预测评测，输出写入 results/prompt_runs/{version}/")
+    ap = argparse.ArgumentParser(description="LLM 情感预测评测，输出按 prompts.version 分目录。")
     ap.add_argument(
-        "--version",
-        dest="prompt_version",
+        "--config",
+        type=Path,
         default=None,
-        help="提示词版本，如 v1/v2/v3；默认从 config.yaml 的 prompts.version 读取",
+        help="项目 config.yaml 路径，默认项目根目录下",
     )
     ap.add_argument(
         "--predictions",
         type=Path,
         default=None,
-        help="覆盖预测 CSV 路径（若指定，输出目录仍由 --version 或文件名推断）",
+        help="覆盖预测 CSV 路径；默认由 config 中 prompts.version 决定",
     )
     ap.add_argument(
-        "--results-dir",
+        "--out-dir",
         type=Path,
         default=None,
-        help="覆盖输出目录（默认 results/prompt_runs/{version}/）",
+        help="覆盖输出目录；默认为 results/prompt_runs/{version}/",
+    )
+    ap.add_argument(
+        "--version",
+        type=str,
+        default=None,
+        metavar="V",
+        help="如 v1：设置 prompts.version 并写入 results/prompt_runs/{v}/（与 llm_inference --version 一致）",
     )
     args = ap.parse_args()
-    run(
-        predictions_path=args.predictions,
-        results_dir=args.results_dir,
-        prompt_version=args.prompt_version,
-    )
+    cfg = _load_config(args.config) if args.config else _load_config()
+    if args.version:
+        apply_prompt_profile(cfg, args.version.strip())
+    run(predictions_path=args.predictions, results_dir=args.out_dir, config=cfg)

@@ -1,39 +1,24 @@
 """
 评估结果可视化脚本
 
-读取（LLM 侧，按提示词版本）:
-- results/prompt_runs/{llm_version}/llm_eval_by_row.csv
-  （若不存在，可回退 results/llm_eval_by_row.csv 以兼容旧目录）
+默认读取（与 config 中 prompts.version 一致）:
+- results/prompt_runs/{version}/llm_eval_by_row.csv
+- results/traditional_baseline_by_row.csv（基线与提示词版本无关，各版本图可共用）
 
-基线:
-- results/traditional_baseline_by_row.csv
+默认输出:
+- results/visualizations/prompt_runs/{version}/*.png
 
-输出:
-- results/prompt_runs/{llm_version}/visualizations/*.png
+可用 --llm-by-row / --out-vis 覆盖。传统基线散点/混淆会写入同一 out-vis 目录，便于每版自洽打包。
 """
 
+from __future__ import annotations
+
 import argparse
-import os
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
 import yaml
-
-
-def _project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-def _load_llm_version_from_config(root: Path) -> str:
-    for p in (root / "config.yaml", Path("config.yaml")):
-        if p.exists():
-            with open(p, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            v = (cfg.get("prompts") or {}).get("version", "v1")
-            return str(v).strip() or "v1"
-    return "v1"
 
 # DEAM 连续标注常用 1～9 量表；横纵统一便于 LLM 与传统基线散点图对比
 # 若出现越界点（如 Ridge 无界预测），仍绘制在图内，坐标轴不随单点被拉到 0～14
@@ -94,29 +79,68 @@ def _plot_confusion(ax, y_true, y_pred, labels, title):
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
 
-def main(llm_version: Optional[str] = None) -> None:
-    root = _project_root()
+def main() -> None:
+    ap = argparse.ArgumentParser(description="LLM+基线评测可视化，输出按 prompts.version 分目录。")
+    ap.add_argument("--config", type=Path, default=None, help="config.yaml 路径，默认项目根")
+    ap.add_argument(
+        "--llm-by-row",
+        type=Path,
+        default=None,
+        help="覆盖：LLM 逐行评测表；默认 results/prompt_runs/{version}/llm_eval_by_row.csv",
+    )
+    ap.add_argument(
+        "--out-vis",
+        type=Path,
+        default=None,
+        help="覆盖：PNG 输出目录；默认 results/visualizations/prompt_runs/{version}/",
+    )
+    ap.add_argument(
+        "--baseline-by-row",
+        type=Path,
+        default=None,
+        help="传统基线逐行表，默认 results/traditional_baseline_by_row.csv",
+    )
+    ap.add_argument(
+        "--version",
+        type=str,
+        default=None,
+        metavar="V",
+        help="如 v1：与 llm_inference/eval 同版，选择 prompt_runs 与作图子目录",
+    )
+    args = ap.parse_args()
+
+    from prompt_artifact_paths import (
+        apply_prompt_profile,
+        llm_results_run_dir,
+        llm_visualizations_run_dir,
+    )
+
+    root = Path(__file__).resolve().parent.parent
+    cfg_path = args.config or (root / "config.yaml")
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    if args.version:
+        apply_prompt_profile(cfg, args.version.strip())
+
     results_dir = root / "results"
-    ver = (llm_version or _load_llm_version_from_config(root)).strip() or "v1"
-
-    llm_by_row_path = results_dir / "prompt_runs" / ver / "llm_eval_by_row.csv"
-    if not llm_by_row_path.exists():
-        legacy = results_dir / "llm_eval_by_row.csv"
-        if legacy.exists():
-            print(
-                f"[WARN] 未找到分版本 LLM 评测文件，回退使用 {legacy.name}。"
-                f" 建议先运行: python src/eval_llm_predictions.py（将写入 results/prompt_runs/{ver}/）"
-            )
-            llm_by_row_path = legacy
-        else:
-            raise FileNotFoundError(
-                f"未找到 LLM 逐行评测: {llm_by_row_path}。请先运行: python src/eval_llm_predictions.py"
-            )
-
-    vis_dir = results_dir / "prompt_runs" / ver / "visualizations"
+    if args.llm_by_row is not None:
+        llm_by_row_path = args.llm_by_row
+    else:
+        llm_by_row_path = llm_results_run_dir(root, cfg) / "llm_eval_by_row.csv"
+    if args.baseline_by_row is not None:
+        base_by_row_path = args.baseline_by_row
+    else:
+        base_by_row_path = results_dir / "traditional_baseline_by_row.csv"
+    if args.out_vis is not None:
+        vis_dir = args.out_vis
+    else:
+        vis_dir = llm_visualizations_run_dir(root, cfg)
     vis_dir.mkdir(parents=True, exist_ok=True)
 
-    base_by_row_path = results_dir / "traditional_baseline_by_row.csv"
+    if not llm_by_row_path.exists():
+        raise FileNotFoundError(
+            f"未找到: {llm_by_row_path}（请先对当前 prompts.version 运行 python src/eval_llm_predictions.py）"
+        )
     if not base_by_row_path.exists():
         raise FileNotFoundError(f"未找到: {base_by_row_path}")
 
@@ -205,16 +229,9 @@ def main(llm_version: Optional[str] = None) -> None:
     fig.savefig(vis_dir / "confusion_matrices.png", dpi=160)
     plt.close(fig)
 
-    print(f"[INFO] 提示词版本: {ver}，图表已生成到: {vis_dir}")
+    print(f"[INFO] 图表已生成到: {vis_dir}")
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description="LLM+基线评测可视化，LLM 图按 results/prompt_runs/{version}/ 分目录输出")
-    ap.add_argument(
-        "--llm-version",
-        default=None,
-        help="与 config.yaml 中 prompts.version 及 eval 输出一致，如 v1/v2/v3",
-    )
-    args = ap.parse_args()
-    main(llm_version=args.llm_version)
+    main()
 

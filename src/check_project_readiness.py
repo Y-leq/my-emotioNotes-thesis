@@ -80,17 +80,18 @@ def main() -> None:
     else:
         lines.append("[缺] 描述: test_descriptions_real.csv / dummy 均不存在")
 
-    pver = str((cfg.get("prompts") or {}).get("version", "v1")).strip() or "v1"
-    pred = emotions_dir / f"llm_predictions_{pver}.csv"
-    pred_legacy = emotions_dir / "llm_predictions_test.csv"
-    if pred.exists():
-        n = len(pd.read_csv(pred))
-        lines.append(f"[OK] LLM 预测: {pred.name}（prompts.version={pver}，{n} 行）")
-    elif pred_legacy.exists():
-        n = len(pd.read_csv(pred_legacy))
-        lines.append(f"[OK] LLM 预测: {pred_legacy.name}（旧名，建议改为 {pred.name}）({n} 行)")
+    pver = str((cfg.get("prompts") or {}).get("version", "v1") or "v1").strip() or "v1"
+    pred_v = emotions_dir / f"llm_predictions_test_{pver}.csv"
+    pred_leg = emotions_dir / "llm_predictions_test.csv"
+    if pred_v.exists():
+        n = len(pd.read_csv(pred_v))
+        lines.append(f"[OK] LLM 预测 (prompts.version={pver}): {pred_v.name} ({n} 行)")
+    elif pred_leg.exists():
+        lines.append(
+            f"[提示] 存在旧名 llm_predictions_test.csv，当前配置需 {pred_v.name}；可复制/重命名后重跑本检查"
+        )
     else:
-        lines.append(f"[缺] LLM 预测: {pred.name}（需运行 llm_inference.py）")
+        lines.append(f"[缺] LLM 预测: {pred_v.name}（先运行 llm_inference.py，version 见 config prompts）")
 
     feat_dir = feature_nested if feature_nested.is_dir() else feature_root
     feat_ids = _feature_ids(feat_dir)
@@ -109,17 +110,20 @@ def main() -> None:
             elif missing:
                 lines.append(f"       缺失 id 示例（前 10）: {missing[:10]}")
 
-    llm_eval = root / "results" / "prompt_runs" / pver / "llm_eval_by_row.csv"
-    llm_eval_legacy = root / "results" / "llm_eval_by_row.csv"
+    run_dir = root / "results" / "prompt_runs" / pver
+    llm_eval = run_dir / "llm_eval_by_row.csv"
+    llm_eval_leg = root / "results" / "llm_eval_by_row.csv"
+    base_eval = root / "results" / "traditional_baseline_by_row.csv"
     if llm_eval.exists():
-        lines.append(f"[OK] LLM 评测: results/prompt_runs/{pver}/llm_eval_by_row.csv")
-    elif llm_eval_legacy.exists():
-        lines.append("[OK] results/llm_eval_by_row.csv（旧位置，建议运行 eval 生成分版本目录）")
+        lines.append(f"[OK] results/prompt_runs/{pver}/llm_eval_by_row.csv")
+    elif llm_eval_leg.exists():
+        lines.append(
+            f"[提示] 存在旧 results/llm_eval_by_row.csv；当前应在 results/prompt_runs/{pver}/ 下，请运行 eval_llm_predictions.py"
+        )
     else:
         lines.append(
-            f"[缺] results/prompt_runs/{pver}/llm_eval_by_row.csv（运行: python src/eval_llm_predictions.py）"
+            f"[缺] {run_dir / 'llm_eval_by_row.csv'}（运行: python src/eval_llm_predictions.py）"
         )
-    base_eval = root / "results" / "traditional_baseline_by_row.csv"
     lines.append(
         f"{'[OK]' if base_eval.exists() else '[缺]'} results/traditional_baseline_by_row.csv"
     )

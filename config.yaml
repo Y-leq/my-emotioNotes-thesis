@@ -25,7 +25,7 @@ audio_to_text:
   provider: "dashscope"
   model_name: "qwen2-audio-instruct"
   endpoint: "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
-  api_key: "sk-xxxxx"
+  api_key: "sk-694950b044d94131bd9babfc29f84cd0"
   temperature: 0.2
   max_tokens: 220
   clip_seconds: 30
@@ -36,8 +36,8 @@ audio_to_text:
 llm:
   provider: "aliyun"  # aliyun | openai | gitcode | atomgit
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 官方；Azure/代理可改为对应兼容端点
-  model_name: "qwen-plus"  # 可改为 gpt-4o、gpt-4.1 等
-  api_key: "sk-xxxxx"  # 优先使用环境变量 OPENAI_API_KEY；仅本地调试可临时填写
+  model_name: "qwen-plus-latest"  # 可改为 gpt-4o、gpt-4.1 等
+  api_key: "sk-694950b044d94131bd9babfc29f84cd0"  # 优先使用环境变量 OPENAI_API_KEY；仅本地调试可临时填写
   temperature: 0.7
   max_tokens: 200
   max_samples: null  # null = 处理描述文件中全部行（须先完成全量 test_descriptions_real.csv）
@@ -57,12 +57,43 @@ output:
   splits_dir: "./data/splits"
   results_dir: "./results"
   
-# 提示词版本（写入 CSV，便于论文与全量实验对齐；修改 prompts 下文件后请递增 version）
+# 提示词版本：与产物目录一一对应，便于论文写「提示词迭代」
+#   - 预测: data/emotions/llm_predictions_test_{version}.csv
+#   - 评测: results/prompt_runs/{version}/llm_eval_*.json|csv
+#   - 图:   results/visualizations/prompt_runs/{version}/*.png
+# 改文案并跑新实验时递增 version（如 v4→v5），旧版文件保留即可留作对比。
+# profiles：供 python src/llm_inference.py --version v1 使用，无需手改上面的 version 行。
+# 论文递进：v1 → v3 → v4 效价反偏置 → v5（v4 口径+纯 JSON 纪律+连续数值提示）
+# 音频转文本与情感提示词**独立**版本化：
+#   - audio_description_version + audio_description_profiles → 提示词文件
+#   - 描述表：data/descriptions/test_descriptions_real_{audio_description_version}.csv
+#   - 可 python src/audio_to_text.py --audio-version v4；llm 侧 python src/llm_inference.py --audio-version v4 --version v5
+#   若设 audio_description_file 为非 null 路径，则该文件优先生效，但仍用 audio_description_version 作为描述 CSV 后缀。
+# 旧的无后缀 test_descriptions_real.csv：llm_inference 会在版本化文件不存在时回退并 [WARN]。
 prompts:
-  version: "v3"
-  audio_description_file: "./prompts/audio_description_v2.txt"
-  llm_system_file: "./prompts/llm_emotion_system_v3.txt"
-  llm_user_template_file: "./prompts/llm_emotion_user_v3.txt"
+  version: "v5"
+  audio_description_version: "v4"
+  audio_description_file: null
+  audio_description_profiles:
+    v2: "./prompts/audio_description_v2.txt"
+    v3: "./prompts/audio_description_v3.txt"
+    v4: "./prompts/audio_description_v4.txt"
+    v5: "./prompts/audio_description_v5.txt"
+  llm_system_file: "./prompts/llm_emotion_system_v5.txt"
+  llm_user_template_file: "./prompts/llm_emotion_user_v5.txt"
+  profiles:
+    v1:
+      llm_system_file: "./prompts/llm_emotion_system_v1.txt"
+      llm_user_template_file: "./prompts/llm_emotion_user_v1.txt"
+    v3:
+      llm_system_file: "./prompts/llm_emotion_system_v3.txt"
+      llm_user_template_file: "./prompts/llm_emotion_user_v3.txt"
+    v4:
+      llm_system_file: "./prompts/llm_emotion_system_v4.txt"
+      llm_user_template_file: "./prompts/llm_emotion_user_v4.txt"
+    v5:
+      llm_system_file: "./prompts/llm_emotion_system_v5.txt"
+      llm_user_template_file: "./prompts/llm_emotion_user_v5.txt"
 
 # 日志配置
 logging:

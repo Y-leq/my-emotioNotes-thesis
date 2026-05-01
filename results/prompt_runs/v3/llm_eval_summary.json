@@ -1,0 +1,15 @@
+{
+  "n_input_rows": 181,
+  "n_eval": 181,
+  "n_skipped_invalid_pred": 0,
+  "n_label_scored": 181,
+  "valence_mae": 2.1359116022099447,
+  "valence_rmse": 2.3999309382328677,
+  "valence_pearson": 0.26637212869616883,
+  "arousal_mae": 1.651381215469613,
+  "arousal_rmse": 1.987807865588935,
+  "arousal_pearson": 0.54754262592623,
+  "label_accuracy": 0.17679558011049723,
+  "predictions_path": "D:/Users/ylq/Desktop/毕设/EmotioNotes-Thesis/data/emotions/llm_predictions_test_v3.csv",
+  "prompt_version": "v3"
+}

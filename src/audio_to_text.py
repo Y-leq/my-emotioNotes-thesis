@@ -3,12 +3,14 @@
 
 - 从 data/splits/test_segments.csv 读取测试集片段
 - 调用阿里云百炼 DashScope 音频理解接口（qwen2-audio-instruct）生成描述
-- 保存到 data/descriptions/test_descriptions_real.csv
+- 保存到 data/descriptions/test_descriptions_real_{audio_version}.csv（与 prompts.audio_description_version 对齐）
 """
+import argparse
 import base64
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 import librosa
 import pandas as pd
@@ -17,6 +19,12 @@ import soundfile as sf
 import yaml
 from tqdm import tqdm
 
+from prompt_artifact_paths import (
+    apply_audio_description_profile,
+    audio_description_version_from_config,
+    resolve_audio_description_file_rel,
+    test_descriptions_real_csv,
+)
 from prompt_loader import load_optional
 
 
@@ -167,8 +175,11 @@ class AudioToTextModel:
         return "[ERROR] Unsupported provider in audio_to_text config"
 
 
-def run(config_path=None):
+def run(config_path=None, audio_version: Optional[str] = None):
     config, project_root = load_config(config_path)
+    if audio_version:
+        apply_audio_description_profile(config, audio_version.strip())
+        print(f"[INFO] 使用音频描述提示词档: {audio_version}（audio_description_profiles）")
     output_cfg = config["output"]
 
     splits_dir = project_root / output_cfg["splits_dir"].lstrip("./")
@@ -184,15 +195,19 @@ def run(config_path=None):
     model_cfg = config.get("audio_to_text", {})
     llm_cfg = config.get("llm", {})
     prompts_cfg = config.get("prompts") or {}
-    prompt_version = str(prompts_cfg.get("version", ""))
-    audio_prompt_rel = prompts_cfg.get("audio_description_file")
-    instruction_prompt = None
-    if audio_prompt_rel:
-        instruction_prompt = load_optional(project_root, str(audio_prompt_rel))
-        if instruction_prompt is None:
-            print(
-                f"[WARN] 未找到音频描述提示词文件 {audio_prompt_rel}，使用内置默认提示词。"
-            )
+    ad_ver = audio_description_version_from_config(config, fallback="v4")
+    try:
+        audio_prompt_rel = resolve_audio_description_file_rel(config)
+    except KeyError as e:
+        raise KeyError(
+            f"{e} 请在 config.yaml 的 prompts 下设置 audio_description_version 与 audio_description_profiles，"
+            "或设 audio_description_file 为显式路径。"
+        ) from e
+    instruction_prompt = load_optional(project_root, str(audio_prompt_rel))
+    if instruction_prompt is None:
+        print(
+            f"[WARN] 未找到音频描述提示词文件 {audio_prompt_rel}，使用内置默认提示词。"
+        )
     if instruction_prompt is None:
         instruction_prompt = _default_audio_instruction_prompt()
     model_name = model_cfg.get("model_name", "qwen2-audio-instruct")
@@ -237,15 +252,29 @@ def run(config_path=None):
             "arousal_mean": row.get("arousal_mean"),
             "description_raw": desc,
         }
-        if prompt_version:
-            rec["prompt_version"] = prompt_version
+        rec["audio_description_version"] = ad_ver
         records.append(rec)
 
-    out_path = descriptions_dir / "test_descriptions_real.csv"
+    out_path = test_descriptions_real_csv(project_root, config)
     pd.DataFrame(records).to_csv(out_path, index=False, encoding="utf-8-sig")
-    print(f"[INFO] 已为测试集生成 {len(records)} 条真实描述 -> {out_path}")
+    print(
+        f"[INFO] 已为测试集生成 {len(records)} 条真实描述（音频提示词 {ad_ver}）-> {out_path.name}"
+    )
 
 
 if __name__ == "__main__":
-    run()
+    ap = argparse.ArgumentParser(
+        description="测试集音频→中文描述。产物: test_descriptions_real_{audio_version}.csv；"
+        "与 prompts.version（情感版）正交。",
+    )
+    ap.add_argument(
+        "--audio-version",
+        type=str,
+        default=None,
+        metavar="V",
+        help="如 v2、v3、v4：使用 config 中 prompts.audio_description_profiles 对应条目，不改 yaml",
+    )
+    ap.add_argument("--config", type=str, default=None, help="config.yaml 路径，默认项目根目录")
+    args = ap.parse_args()
+    run(config_path=args.config, audio_version=args.audio_version)
 

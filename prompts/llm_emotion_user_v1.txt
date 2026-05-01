@@ -1,0 +1,4 @@
+音乐描述：
+<<<DESCRIPTION>>>
+
+请根据上述描述，给出 JSON，例如：{"valence": 5.00, "arousal": 5.00}。valence 与 arousal 均应在 1～9 范围内。

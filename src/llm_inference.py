@@ -1,8 +1,8 @@
 """
 LLM 情感推理（Demo）
 
-输入：data/descriptions/test_descriptions_real.csv（或 dummy）
-输出：data/emotions/llm_predictions_{prompts.version}.csv（由 config.yaml 的 prompts.version 决定，如 v3）
+输入：data/descriptions/test_descriptions_real_{audio_version}.csv（或回退无后缀旧文件）
+输出：data/emotions/llm_predictions_test_{prompts.version}.csv（与 config 中 prompts.version 对齐，便于多版本对照）
 
 说明：
 - 先用占位描述跑通全链路，后续接入真实音频模型生成的描述时，保持输入 CSV 字段不变即可复用。
@@ -12,6 +12,8 @@ LLM 情感推理（Demo）
 - API Key 通过环境变量（OPENAI_API_KEY/ALIYUN_API_KEY 等）或 config.yaml 的 llm.api_key（勿提交密钥到仓库）。
 """
 
+from __future__ import annotations
+
 import json
 import math
 import os
@@ -19,6 +21,7 @@ import re
 import time
 import http.client
 from pathlib import Path
+from typing import Optional
 
 from openai import OpenAI
 import pandas as pd
@@ -27,6 +30,14 @@ import yaml
 from tqdm import tqdm
 
 from emotion_label_mapping import map_valence_arousal_to_label
+from prompt_artifact_paths import (
+    apply_audio_description_profile,
+    apply_prompt_profile,
+    audio_description_version_from_config,
+    llm_predictions_csv,
+    resolve_test_descriptions_input_path,
+    test_descriptions_real_csv,
+)
 from prompt_loader import load_optional
 
 
@@ -275,8 +286,18 @@ def get_api_key(llm_cfg):
     return None
 
 
-def run(config_path=None):
+def run(
+    config_path=None,
+    prompt_version: Optional[str] = None,
+    audio_version: Optional[str] = None,
+):
     config, project_root = load_config(config_path)
+    if audio_version:
+        apply_audio_description_profile(config, audio_version.strip())
+        print(f"[INFO] 使用音频描述数据/提示词档: {audio_version}（audio_description_profiles）")
+    if prompt_version:
+        apply_prompt_profile(config, prompt_version.strip())
+        print(f"[INFO] 使用情感提示词配置档: {prompt_version}（profiles）")
 
     llm_cfg = config.get("llm", {})
     api_key = get_api_key(llm_cfg)
@@ -297,19 +318,32 @@ def run(config_path=None):
     emotions_dir = project_root / output_cfg["emotions_dir"].lstrip("./")
     emotions_dir.mkdir(parents=True, exist_ok=True)
 
-    real_path = descriptions_dir / "test_descriptions_real.csv"
+    ad_ver = audio_description_version_from_config(config)
+    versioned = test_descriptions_real_csv(project_root, config)
+    legacy = descriptions_dir / "test_descriptions_real.csv"
     dummy_path = descriptions_dir / "test_descriptions_dummy.csv"
-    if real_path.exists():
-        in_path = real_path
-    elif dummy_path.exists():
-        in_path = dummy_path
-    else:
-        raise FileNotFoundError(
-            f"未找到输入描述文件：{real_path} 或 {dummy_path}，请先运行 audio_to_text.py"
+    in_path = resolve_test_descriptions_input_path(project_root, config)
+    if in_path == legacy and in_path.exists():
+        print(
+            f"[WARN] 使用无后缀旧文件 {in_path.name}；"
+            f"与当前 audio_description_version={ad_ver!r} 不完全绑定，建议用 audio_to_text 生成 {versioned.name}"
         )
+    if not in_path.exists():
+        if dummy_path.exists():
+            in_path = dummy_path
+        else:
+            raise FileNotFoundError(
+                f"未找到输入描述：期望 {versioned}（或旧版 {legacy}），或 {dummy_path}。"
+                f" 请先按当前 audio 提示词版运行: python src/audio_to_text.py [--audio-version {ad_ver}]"
+            )
 
-    prompt_ver = str((config.get("prompts") or {}).get("version", "v1")).strip() or "v1"
-    out_path = emotions_dir / f"llm_predictions_{prompt_ver}.csv"
+    out_path = llm_predictions_csv(project_root, config)
+    try:
+        in_rel = in_path.resolve().relative_to(project_root.resolve())
+    except ValueError:
+        in_rel = in_path
+    print(f"[INFO] 输入描述文件: {in_rel}")
+    print(f"[INFO] 当前情感 prompts.version 输出: {out_path.name}")
 
     df = pd.read_csv(in_path)
     required_cols = {"segment_id", "song_id", "audio_path", "description_raw"}
@@ -333,10 +367,6 @@ def run(config_path=None):
             done_ids = set()
 
     buffer_records = []
-    print(
-        f"[INFO] 提示词版本: {prompt_ver}，输出: {out_path.name}；"
-        f"评测/作图请使用同版本: python src/eval_llm_predictions.py 与 python src/plot_eval_results.py"
-    )
     print(f"[INFO] 开始对测试集 {len(df)} 条样本进行 LLM 情感推理...")
 
     for _, row in tqdm(df.iterrows(), total=len(df)):
@@ -431,4 +461,29 @@ def run(config_path=None):
 
 
 if __name__ == "__main__":
-    run()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="LLM 情感推理；--version 指定 prompts.profiles（如 v1/v3/v4）。")
+    ap.add_argument(
+        "--version",
+        type=str,
+        default=None,
+        metavar="V",
+        help="情感提示词：如 v1、v3、v4、v5，对应 config prompts.profiles",
+    )
+    ap.add_argument(
+        "--audio-version",
+        type=str,
+        default=None,
+        dest="audio_version",
+        metavar="A",
+        help="音频描述提示词/描述表：如 v2、v3、v4，对应 prompts.audio_description_profiles；"
+        "输入为 test_descriptions_real_{A}.csv",
+    )
+    ap.add_argument("--config", type=str, default=None, help="config.yaml 路径，默认项目根目录")
+    args = ap.parse_args()
+    run(
+        config_path=args.config,
+        prompt_version=args.version,
+        audio_version=args.audio_version,
+    )
